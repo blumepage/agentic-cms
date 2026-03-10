@@ -201,7 +201,7 @@ export function renderNewProjectForm() {
           <h2 class="text-xl font-bold text-surface-900">Create New Project</h2>
         </div>
         <div class="bg-white rounded-xl border border-surface-200 shadow-sm">
-          <form id="new-project-form">
+          <form id="new-project-form" method="post" action="/admin/new">
             <div class="p-6 space-y-5">
               <div class="grid grid-cols-2 gap-4">
                 <div>
@@ -219,9 +219,7 @@ export function renderNewProjectForm() {
               </div>
             </div>
             <div class="flex justify-end px-6 py-4 bg-surface-50 border-t border-surface-100 rounded-b-xl">
-              <button type="button" hx-post="/api/projects" hx-include="#new-project-form" hx-target="body" hx-swap="innerHTML"
-                      hx-on::after-request="if(event.detail.successful) window.location='/admin'"
-                      class="inline-flex items-center gap-1.5 px-4 py-2.5 bg-brand-600 text-white rounded-lg hover:bg-brand-700 text-sm font-medium shadow-sm transition-colors">Create Project</button>
+              <button type="submit" class="inline-flex items-center gap-1.5 px-4 py-2.5 bg-brand-600 text-white rounded-lg hover:bg-brand-700 text-sm font-medium shadow-sm transition-colors">Create Project</button>
             </div>
           </form>
         </div>
@@ -241,7 +239,7 @@ export function renderNewFileForm(projectSlug: string) {
           <h2 class="text-xl font-bold text-surface-900">New File</h2>
         </div>
         <div class="bg-white rounded-xl border border-surface-200 shadow-sm">
-          <form id="new-file-form">
+          <form id="new-file-form" method="post" action="/admin/project/${projectSlug}/new">
             <div class="p-6 space-y-5">
               <div class="grid grid-cols-2 gap-4">
                 <div>
@@ -269,9 +267,7 @@ export function renderNewFileForm(projectSlug: string) {
               </div>
             </div>
             <div class="flex justify-end px-6 py-4 bg-surface-50 border-t border-surface-100 rounded-b-xl">
-              <button type="button" hx-put="/api/projects/${projectSlug}/files/" hx-include="#new-file-form" hx-target="body" hx-swap="innerHTML"
-                      hx-on::after-request="if(event.detail.successful) window.location='/admin/project/${projectSlug}'"
-                      class="inline-flex items-center gap-1.5 px-4 py-2.5 bg-brand-600 text-white rounded-lg hover:bg-brand-700 text-sm font-medium shadow-sm transition-colors">Create File</button>
+              <button type="submit" class="inline-flex items-center gap-1.5 px-4 py-2.5 bg-brand-600 text-white rounded-lg hover:bg-brand-700 text-sm font-medium shadow-sm transition-colors">Create File</button>
             </div>
           </form>
         </div>
