@@ -5,6 +5,15 @@ import { gitSyncPage } from '../lib/git-sync'
 
 const api = new Hono<HonoEnv>()
 
+// Helper to parse body from either JSON or form data
+async function parseBody(c: { req: { header: (name: string) => string | undefined; json: () => Promise<Record<string, unknown>>; parseBody: () => Promise<Record<string, unknown>> } }): Promise<Record<string, unknown>> {
+  const contentType = c.req.header('content-type') || ''
+  if (contentType.includes('application/json')) {
+    return await c.req.json()
+  }
+  return await c.req.parseBody() as Record<string, unknown>
+}
+
 // List all pages
 api.get('/pages', async (c) => {
   const sql = c.get('sql')
@@ -18,11 +27,15 @@ api.get('/pages', async (c) => {
 // Create a new page
 api.post('/pages', async (c) => {
   const sql = c.get('sql')
-  const body = await c.req.json()
+  const body = await parseBody(c)
+
+  if (!body.slug || !body.title) {
+    return c.json({ error: 'slug and title are required' }, 400)
+  }
 
   const result = await sql`
     INSERT INTO pages (slug, title, content, meta, updated_by)
-    VALUES (${body.slug}, ${body.title}, ${body.content || ''}, ${JSON.stringify(body.meta || {})}::jsonb, ${body.author || 'human'})
+    VALUES (${body.slug as string}, ${body.title as string}, ${(body.content as string) || ''}, ${JSON.stringify(body.meta || {})}::jsonb, ${(body.author as string) || 'human'})
     RETURNING *
   `
   const created = result[0]
@@ -43,7 +56,7 @@ api.get('/pages/:slug', async (c) => {
 // Update page content (agent writes here)
 api.put('/pages/:slug', async (c) => {
   const sql = c.get('sql')
-  const body = await c.req.json()
+  const body = await parseBody(c)
   const slug = c.req.param('slug')
 
   const metaValue = body.meta
@@ -147,7 +160,10 @@ api.post('/pages/:slug/unpublish', async (c) => {
 
 // Trigger agent edit
 api.post('/agent/edit', async (c) => {
-  const { slug, instruction, maxIterations } = await c.req.json()
+  const body = await parseBody(c)
+  const slug = body.slug as string
+  const instruction = body.instruction as string
+  const maxIterations = body.maxIterations as number | undefined
 
   if (!slug || !instruction) {
     return c.json({ error: 'slug and instruction are required' }, 400)
@@ -194,14 +210,14 @@ api.get('/components/:name', async (c) => {
 
 api.put('/components/:name', async (c) => {
   const sql = c.get('sql')
-  const body = await c.req.json()
+  const body = await parseBody(c)
   const name = c.req.param('name')
 
   const result = await sql`
     INSERT INTO components (name, html, props)
-    VALUES (${name}, ${body.html}, ${JSON.stringify(body.props || {})}::jsonb)
+    VALUES (${name}, ${body.html as string}, ${JSON.stringify(body.props || {})}::jsonb)
     ON CONFLICT (name) DO UPDATE
-    SET html = ${body.html},
+    SET html = ${body.html as string},
         props = ${JSON.stringify(body.props || {})}::jsonb,
         updated_at = now()
     RETURNING *
