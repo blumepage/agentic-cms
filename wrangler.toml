@@ -1,9 +1,9 @@
-name = "agentic-cms"
+name = "agentic-landing-cms"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 
 [vars]
-BASE_URL = "https://agentic-cms.blumepage.workers.dev"
+BASE_URL = "https://agentic-landing-cms.agentic-cms-olav.workers.dev"
 GITHUB_REPO = "blumepage/agentic-cms"
 
 # Secrets (set via `wrangler secret put`):
@@ -17,7 +17,7 @@ bindings = [
 
 [[migrations]]
 tag = "v1"
-new_classes = ["AgentSession"]
+new_sqlite_classes = ["AgentSession"]
 
 # Cron trigger for periodic git sync
 [triggers]
