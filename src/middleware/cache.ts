@@ -15,6 +15,15 @@ export const cacheMiddleware: MiddlewareHandler<HonoEnv> = async (c, next) => {
   c.executionCtx.waitUntil(cache.put(cacheKey, response))
 }
 
+export async function purgeFileCache(projectSlug: string, filePath: string, baseUrl: string) {
+  try {
+    const cache = caches.default
+    await cache.delete(new Request(`${baseUrl}/s/${projectSlug}${filePath}`))
+  } catch {
+    // Cache purge is best-effort
+  }
+}
+
 export async function purgePageCache(slug: string, baseUrl: string) {
   const cache = caches.default
   await cache.delete(new Request(`${baseUrl}/page/${slug}`))

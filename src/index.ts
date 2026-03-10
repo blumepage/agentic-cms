@@ -3,6 +3,7 @@ import { cors } from 'hono/cors'
 import { pages } from './routes/pages'
 import { admin } from './routes/admin'
 import { api } from './routes/api'
+import { serve } from './routes/serve'
 import { dbMiddleware } from './middleware/db'
 import { cacheMiddleware } from './middleware/cache'
 import { branchMiddleware } from './middleware/branch'
@@ -23,17 +24,20 @@ app.get('/', (c) => {
     name: 'agentic-cms',
     status: 'ok',
     endpoints: {
-      pages: '/page/:slug',
+      projects: '/api/projects',
+      files: '/api/projects/:slug/files',
+      serve: '/s/:projectSlug/*',
       admin: '/admin',
-      api: '/api/pages',
+      legacyPages: '/page/:slug',
       agent: '/api/agent/edit',
     }
   })
 })
 
-app.route('/page', pages)
 app.route('/admin', admin)
 app.route('/api', api)
+app.route('/s', serve)
+app.route('/page', pages)
 
 export default {
   fetch: app.fetch,

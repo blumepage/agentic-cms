@@ -18,6 +18,39 @@ export type HonoEnv = {
   }
 }
 
+export interface Project {
+  id: number
+  name: string
+  slug: string
+  custom_domain: string | null
+  settings: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export interface ProjectFile {
+  id: number
+  project_id: number
+  path: string
+  content: string
+  content_type: string
+  is_dynamic: boolean
+  meta: Record<string, unknown>
+  updated_at: string
+  updated_by: string
+}
+
+export interface FileVersion {
+  id: number
+  file_id: number
+  content: string
+  version: number
+  created_by: string
+  message: string
+  created_at: string
+}
+
+// Legacy types kept for backward compat
 export interface Page {
   id: number
   slug: string

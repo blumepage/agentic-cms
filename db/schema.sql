@@ -1,7 +1,80 @@
 -- Agentic CMS Database Schema
 -- Run against a Neon Postgres database
 
--- Pages table — current live content
+-- Projects table — each project is a deployable site
+CREATE TABLE IF NOT EXISTS projects (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  slug TEXT UNIQUE NOT NULL,
+  custom_domain TEXT,
+  settings JSONB DEFAULT '{}',
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_projects_slug ON projects(slug);
+CREATE INDEX IF NOT EXISTS idx_projects_domain ON projects(custom_domain);
+
+-- Files table — every file in a project (HTML, CSS, JS, images, API routes)
+CREATE TABLE IF NOT EXISTS files (
+  id SERIAL PRIMARY KEY,
+  project_id INT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  content_type TEXT NOT NULL DEFAULT 'text/html',
+  is_dynamic BOOLEAN DEFAULT false,
+  meta JSONB DEFAULT '{}',
+  updated_at TIMESTAMPTZ DEFAULT now(),
+  updated_by TEXT DEFAULT 'system',
+  UNIQUE(project_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_files_project_path ON files(project_id, path);
+
+-- File versions table — full version history per file
+CREATE TABLE IF NOT EXISTS file_versions (
+  id SERIAL PRIMARY KEY,
+  file_id INT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  content TEXT NOT NULL,
+  version INT NOT NULL,
+  created_by TEXT DEFAULT 'system',
+  message TEXT,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_versions_file ON file_versions(file_id, version DESC);
+
+-- Components table — reusable HTML fragments (shared across projects)
+CREATE TABLE IF NOT EXISTS components (
+  id SERIAL PRIMARY KEY,
+  name TEXT UNIQUE NOT NULL,
+  html TEXT NOT NULL,
+  props JSONB DEFAULT '{}',
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Auto-versioning trigger for files
+CREATE OR REPLACE FUNCTION save_file_version()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO file_versions (file_id, content, version, created_by, message)
+  VALUES (
+    NEW.id,
+    NEW.content,
+    COALESCE((SELECT MAX(version) FROM file_versions WHERE file_id = NEW.id), 0) + 1,
+    NEW.updated_by,
+    'Auto-versioned on update'
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS file_version_trigger ON files;
+CREATE TRIGGER file_version_trigger
+AFTER INSERT OR UPDATE ON files
+FOR EACH ROW EXECUTE FUNCTION save_file_version();
+
+-- Legacy tables (kept for backward compat)
 CREATE TABLE IF NOT EXISTS pages (
   id SERIAL PRIMARY KEY,
   slug TEXT UNIQUE NOT NULL,
@@ -16,7 +89,6 @@ CREATE TABLE IF NOT EXISTS pages (
 CREATE INDEX IF NOT EXISTS idx_pages_slug ON pages(slug);
 CREATE INDEX IF NOT EXISTS idx_pages_status ON pages(status);
 
--- Page versions table — full version history
 CREATE TABLE IF NOT EXISTS page_versions (
   id SERIAL PRIMARY KEY,
   page_id INT REFERENCES pages(id) ON DELETE CASCADE,
@@ -31,16 +103,6 @@ CREATE TABLE IF NOT EXISTS page_versions (
 
 CREATE INDEX IF NOT EXISTS idx_versions_page ON page_versions(page_id, version DESC);
 
--- Components table — reusable HTML fragments
-CREATE TABLE IF NOT EXISTS components (
-  id SERIAL PRIMARY KEY,
-  name TEXT UNIQUE NOT NULL,
-  html TEXT NOT NULL,
-  props JSONB DEFAULT '{}',
-  updated_at TIMESTAMPTZ DEFAULT now()
-);
-
--- Auto-versioning trigger
 CREATE OR REPLACE FUNCTION save_page_version()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -58,40 +120,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE TRIGGER page_version_trigger
+DROP TRIGGER IF EXISTS page_version_trigger ON pages;
+CREATE TRIGGER page_version_trigger
 AFTER INSERT OR UPDATE ON pages
 FOR EACH ROW EXECUTE FUNCTION save_page_version();
-
--- Seed a sample page
-INSERT INTO pages (slug, title, content, status, updated_by)
-VALUES (
-  'home',
-  'Welcome to Agentic CMS',
-  '<div class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
-  <div class="max-w-4xl mx-auto px-4 py-16">
-    <div class="text-center">
-      <h1 class="text-5xl font-bold text-gray-900 mb-4">Ship Faster with AI</h1>
-      <p class="text-xl text-gray-600 mb-8">Automated landing pages that update themselves. Edit with natural language, preview instantly, version everything.</p>
-      <a href="/admin" class="inline-block px-8 py-3 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition-colors">
-        Get Started
-      </a>
-    </div>
-    <div class="mt-16 grid grid-cols-1 md:grid-cols-3 gap-8">
-      <div class="bg-white rounded-xl p-6 shadow-sm">
-        <h3 class="text-lg font-semibold mb-2">AI-Powered Editing</h3>
-        <p class="text-gray-600">Tell the agent what to change in plain English. It generates HTML, validates, and iterates.</p>
-      </div>
-      <div class="bg-white rounded-xl p-6 shadow-sm">
-        <h3 class="text-lg font-semibold mb-2">Instant Preview</h3>
-        <p class="text-gray-600">Changes go live immediately. No build step, no deploy. HTMX + Alpine.js for interactivity.</p>
-      </div>
-      <div class="bg-white rounded-xl p-6 shadow-sm">
-        <h3 class="text-lg font-semibold mb-2">Full Version History</h3>
-        <p class="text-gray-600">Every edit is versioned automatically. Rollback to any previous version with one click.</p>
-      </div>
-    </div>
-  </div>
-</div>',
-  'published',
-  'system'
-) ON CONFLICT (slug) DO NOTHING;

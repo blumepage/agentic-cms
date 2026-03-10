@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import type { HonoEnv } from '../types'
-import { purgePageCache } from '../middleware/cache'
-import { gitSyncPage } from '../lib/git-sync'
+import { purgeFileCache } from '../middleware/cache'
+import { gitSyncFile } from '../lib/git-sync'
 
 const api = new Hono<HonoEnv>()
 
@@ -14,162 +14,225 @@ async function parseBody(c: { req: { header: (name: string) => string | undefine
   return await c.req.parseBody() as Record<string, unknown>
 }
 
-// List all pages
-api.get('/pages', async (c) => {
+// ─── Projects ───────────────────────────────────────────
+
+// List all projects
+api.get('/projects', async (c) => {
   const sql = c.get('sql')
-  const pages = await sql`
-    SELECT id, slug, title, status, updated_at, updated_by
-    FROM pages ORDER BY updated_at DESC
+  const projects = await sql`
+    SELECT p.*, (SELECT count(*) FROM files f WHERE f.project_id = p.id) as file_count
+    FROM projects p ORDER BY p.updated_at DESC
   `
-  return c.json(pages)
+  return c.json(projects)
 })
 
-// Create a new page
-api.post('/pages', async (c) => {
+// Create a project
+api.post('/projects', async (c) => {
   const sql = c.get('sql')
   const body = await parseBody(c)
 
-  if (!body.slug || !body.title) {
-    return c.json({ error: 'slug and title are required' }, 400)
+  if (!body.name || !body.slug) {
+    return c.json({ error: 'name and slug are required' }, 400)
   }
 
   const result = await sql`
-    INSERT INTO pages (slug, title, content, meta, updated_by)
-    VALUES (${body.slug as string}, ${body.title as string}, ${(body.content as string) || ''}, ${JSON.stringify(body.meta || {})}::jsonb, ${(body.author as string) || 'human'})
+    INSERT INTO projects (name, slug, custom_domain, settings)
+    VALUES (${body.name as string}, ${body.slug as string}, ${(body.custom_domain as string) || null}, ${JSON.stringify(body.settings || {})}::jsonb)
     RETURNING *
   `
   const created = result[0]
+  if (!created) return c.json({ error: 'failed to create project' }, 500)
 
-  if (!created) return c.json({ error: 'failed to create page' }, 500)
+  // Auto-create index.html for new projects
+  await sql`
+    INSERT INTO files (project_id, path, content, content_type, updated_by)
+    VALUES (${created.id}, '/index.html', '<h1>Welcome</h1><p>Edit this page to get started.</p>', 'text/html', 'system')
+  `
+
   return c.json(created, 201)
 })
 
-// Get current page content
-api.get('/pages/:slug', async (c) => {
+// Get a project
+api.get('/projects/:slug', async (c) => {
   const sql = c.get('sql')
-  const result = await sql`SELECT * FROM pages WHERE slug = ${c.req.param('slug')}`
-  const page = result[0]
-  if (!page) return c.json({ error: 'not found' }, 404)
-  return c.json(page)
+  const result = await sql`SELECT * FROM projects WHERE slug = ${c.req.param('slug')}`
+  const project = result[0]
+  if (!project) return c.json({ error: 'not found' }, 404)
+  return c.json(project)
 })
 
-// Update page content (agent writes here)
-api.put('/pages/:slug', async (c) => {
+// Update a project
+api.put('/projects/:slug', async (c) => {
   const sql = c.get('sql')
   const body = await parseBody(c)
   const slug = c.req.param('slug')
 
-  const metaValue = body.meta
-    ? (typeof body.meta === 'string' ? body.meta : JSON.stringify(body.meta))
-    : null
-
   const result = await sql`
-    UPDATE pages
-    SET content = ${body.content},
-        title = COALESCE(${body.title || null}, title),
-        meta = COALESCE(${metaValue}::jsonb, meta),
-        updated_by = ${body.author || 'ai-agent'},
+    UPDATE projects
+    SET name = COALESCE(${(body.name as string) || null}, name),
+        custom_domain = COALESCE(${(body.custom_domain as string) || null}, custom_domain),
+        settings = COALESCE(${body.settings ? JSON.stringify(body.settings) : null}::jsonb, settings),
         updated_at = now()
     WHERE slug = ${slug}
     RETURNING *
   `
   const updated = result[0]
-
   if (!updated) return c.json({ error: 'not found' }, 404)
-
-  // Purge edge cache
-  try {
-    await purgePageCache(slug, c.env.BASE_URL)
-  } catch {
-    // Cache purge is best-effort
-  }
-
-  // Trigger async git sync (fire and forget)
-  if (c.env.GITHUB_TOKEN && c.env.GITHUB_REPO) {
-    c.executionCtx?.waitUntil?.(
-      gitSyncPage(slug, updated as Record<string, unknown>, c.env).catch(() => {})
-    )
-  }
-
   return c.json(updated)
 })
 
-// List all page versions
-api.get('/pages/:slug/versions', async (c) => {
+// Delete a project
+api.delete('/projects/:slug', async (c) => {
   const sql = c.get('sql')
+  const result = await sql`DELETE FROM projects WHERE slug = ${c.req.param('slug')} RETURNING id`
+  if (result.length === 0) return c.json({ error: 'not found' }, 404)
+  return c.json({ deleted: true })
+})
+
+// ─── Files ──────────────────────────────────────────────
+
+// List files in a project
+api.get('/projects/:slug/files', async (c) => {
+  const sql = c.get('sql')
+  const projectSlug = c.req.param('slug')
+
+  const files = await sql`
+    SELECT f.id, f.path, f.content_type, f.is_dynamic, f.meta, f.updated_at, f.updated_by
+    FROM files f
+    JOIN projects p ON p.id = f.project_id
+    WHERE p.slug = ${projectSlug}
+    ORDER BY f.path
+  `
+  return c.json(files)
+})
+
+// Create or update a file
+api.put('/projects/:slug/files/*', async (c) => {
+  const sql = c.get('sql')
+  const projectSlug = c.req.param('slug')
+  const body = await parseBody(c)
+
+  // Extract file path from URL: /api/projects/:slug/files/path/to/file
+  const url = new URL(c.req.url)
+  const prefix = `/api/projects/${projectSlug}/files`
+  let filePath = url.pathname.slice(prefix.length) || '/'
+  // Also allow path in body (for form submissions)
+  if (body.path) filePath = body.path as string
+  if (!filePath.startsWith('/')) filePath = '/' + filePath
+
+  // Determine content type
+  const contentType = (body.content_type as string) || guessContentType(filePath)
+  const isDynamic = body.is_dynamic === true || body.is_dynamic === 'true' || filePath.startsWith('/api/')
+
+  const projectResult = await sql`SELECT id FROM projects WHERE slug = ${projectSlug}`
+  const project = projectResult[0]
+  if (!project) return c.json({ error: 'project not found' }, 404)
+
+  const result = await sql`
+    INSERT INTO files (project_id, path, content, content_type, is_dynamic, meta, updated_by)
+    VALUES (${project.id}, ${filePath}, ${(body.content as string) || ''}, ${contentType}, ${isDynamic}, ${JSON.stringify(body.meta || {})}::jsonb, ${(body.author as string) || 'human'})
+    ON CONFLICT (project_id, path) DO UPDATE
+    SET content = ${(body.content as string) || ''},
+        content_type = ${contentType},
+        is_dynamic = ${isDynamic},
+        meta = COALESCE(${body.meta ? JSON.stringify(body.meta) : null}::jsonb, files.meta),
+        updated_by = ${(body.author as string) || 'human'},
+        updated_at = now()
+    RETURNING *
+  `
+  const file = result[0]
+
+  // Purge cache
+  try {
+    await purgeFileCache(projectSlug, filePath, c.env.BASE_URL)
+  } catch { /* best-effort */ }
+
+  // Git sync (fire and forget)
+  if (c.env.GITHUB_TOKEN && c.env.GITHUB_REPO) {
+    c.executionCtx?.waitUntil?.(
+      gitSyncFile(projectSlug, filePath, file as Record<string, unknown>, c.env).catch(() => {})
+    )
+  }
+
+  return c.json(file)
+})
+
+// Get a specific file
+api.get('/projects/:slug/files/*', async (c) => {
+  const sql = c.get('sql')
+  const projectSlug = c.req.param('slug')
+
+  const url = new URL(c.req.url)
+  const prefix = `/api/projects/${projectSlug}/files`
+  let filePath = url.pathname.slice(prefix.length) || '/'
+  if (!filePath.startsWith('/')) filePath = '/' + filePath
+
+  const result = await sql`
+    SELECT f.* FROM files f
+    JOIN projects p ON p.id = f.project_id
+    WHERE p.slug = ${projectSlug} AND f.path = ${filePath}
+  `
+  const file = result[0]
+  if (!file) return c.json({ error: 'not found' }, 404)
+  return c.json(file)
+})
+
+// Delete a file
+api.delete('/projects/:slug/files/*', async (c) => {
+  const sql = c.get('sql')
+  const projectSlug = c.req.param('slug')
+
+  const url = new URL(c.req.url)
+  const prefix = `/api/projects/${projectSlug}/files`
+  let filePath = url.pathname.slice(prefix.length) || '/'
+  if (!filePath.startsWith('/')) filePath = '/' + filePath
+
+  const result = await sql`
+    DELETE FROM files f
+    USING projects p
+    WHERE p.id = f.project_id AND p.slug = ${projectSlug} AND f.path = ${filePath}
+    RETURNING f.id
+  `
+  if (result.length === 0) return c.json({ error: 'not found' }, 404)
+  return c.json({ deleted: true })
+})
+
+// ─── File Versions ──────────────────────────────────────
+
+api.get('/projects/:slug/files/*/versions', async (c) => {
+  const sql = c.get('sql')
+  const projectSlug = c.req.param('slug')
+
+  const url = new URL(c.req.url)
+  const prefix = `/api/projects/${projectSlug}/files`
+  // Remove /versions suffix to get file path
+  let filePath = url.pathname.slice(prefix.length).replace(/\/versions$/, '') || '/'
+  if (!filePath.startsWith('/')) filePath = '/' + filePath
+
   const versions = await sql`
-    SELECT v.* FROM page_versions v
-    JOIN pages p ON p.id = v.page_id
-    WHERE p.slug = ${c.req.param('slug')}
-    ORDER BY v.version DESC
+    SELECT fv.* FROM file_versions fv
+    JOIN files f ON f.id = fv.file_id
+    JOIN projects p ON p.id = f.project_id
+    WHERE p.slug = ${projectSlug} AND f.path = ${filePath}
+    ORDER BY fv.version DESC
     LIMIT 50
   `
   return c.json(versions)
 })
 
-// Rollback to a specific version
-api.post('/pages/:slug/rollback/:version', async (c) => {
-  const sql = c.get('sql')
-  const slug = c.req.param('slug')
-  const version = parseInt(c.req.param('version'))
+// ─── Agent ──────────────────────────────────────────────
 
-  const vResult = await sql`
-    SELECT v.content, v.title, v.meta FROM page_versions v
-    JOIN pages p ON p.id = v.page_id
-    WHERE p.slug = ${slug} AND v.version = ${version}
-  `
-  const v = vResult[0]
-  if (!v) return c.json({ error: 'version not found' }, 404)
-
-  const result = await sql`
-    UPDATE pages
-    SET content = ${v.content}, title = ${v.title}, meta = ${v.meta}::jsonb,
-        updated_by = 'rollback', updated_at = now()
-    WHERE slug = ${slug}
-    RETURNING *
-  `
-  const updated = result[0]
-  return c.json(updated)
-})
-
-// Publish
-api.post('/pages/:slug/publish', async (c) => {
-  const sql = c.get('sql')
-  const result = await sql`
-    UPDATE pages SET status = 'published', updated_at = now()
-    WHERE slug = ${c.req.param('slug')}
-    RETURNING *
-  `
-  const page = result[0]
-  if (!page) return c.json({ error: 'not found' }, 404)
-  return c.json(page)
-})
-
-// Unpublish (set to draft)
-api.post('/pages/:slug/unpublish', async (c) => {
-  const sql = c.get('sql')
-  const result = await sql`
-    UPDATE pages SET status = 'draft', updated_at = now()
-    WHERE slug = ${c.req.param('slug')}
-    RETURNING *
-  `
-  const page = result[0]
-  if (!page) return c.json({ error: 'not found' }, 404)
-  return c.json(page)
-})
-
-// Trigger agent edit
 api.post('/agent/edit', async (c) => {
   const body = await parseBody(c)
-  const slug = body.slug as string
+  const projectSlug = body.project as string
+  const filePath = body.path as string
   const instruction = body.instruction as string
   const maxIterations = body.maxIterations as number | undefined
 
-  if (!slug || !instruction) {
-    return c.json({ error: 'slug and instruction are required' }, 400)
+  if (!projectSlug || !filePath || !instruction) {
+    return c.json({ error: 'project, path, and instruction are required' }, 400)
   }
 
-  // Create a Durable Object instance for this session
   const id = c.env.AGENT_SESSION.newUniqueId()
   const stub = c.env.AGENT_SESSION.get(id)
 
@@ -177,7 +240,8 @@ api.post('/agent/edit', async (c) => {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      slug,
+      projectSlug,
+      filePath,
       instruction,
       maxIterations: maxIterations || 5,
       env: {
@@ -193,7 +257,8 @@ api.post('/agent/edit', async (c) => {
   return c.json(await result.json())
 })
 
-// Components CRUD
+// ─── Components (shared fragments) ─────────────────────
+
 api.get('/components', async (c) => {
   const sql = c.get('sql')
   const components = await sql`SELECT * FROM components ORDER BY name`
@@ -224,5 +289,123 @@ api.put('/components/:name', async (c) => {
   `
   return c.json(result[0])
 })
+
+// ─── Legacy page endpoints (backward compat) ───────────
+
+api.get('/pages', async (c) => {
+  const sql = c.get('sql')
+  const pages = await sql`
+    SELECT id, slug, title, status, updated_at, updated_by
+    FROM pages ORDER BY updated_at DESC
+  `
+  return c.json(pages)
+})
+
+api.post('/pages', async (c) => {
+  const sql = c.get('sql')
+  const body = await parseBody(c)
+  if (!body.slug || !body.title) {
+    return c.json({ error: 'slug and title are required' }, 400)
+  }
+  const result = await sql`
+    INSERT INTO pages (slug, title, content, meta, updated_by)
+    VALUES (${body.slug as string}, ${body.title as string}, ${(body.content as string) || ''}, ${JSON.stringify(body.meta || {})}::jsonb, ${(body.author as string) || 'human'})
+    RETURNING *
+  `
+  const created = result[0]
+  if (!created) return c.json({ error: 'failed to create page' }, 500)
+  return c.json(created, 201)
+})
+
+api.get('/pages/:slug', async (c) => {
+  const sql = c.get('sql')
+  const result = await sql`SELECT * FROM pages WHERE slug = ${c.req.param('slug')}`
+  const page = result[0]
+  if (!page) return c.json({ error: 'not found' }, 404)
+  return c.json(page)
+})
+
+api.put('/pages/:slug', async (c) => {
+  const sql = c.get('sql')
+  const body = await parseBody(c)
+  const slug = c.req.param('slug')
+  const metaValue = body.meta
+    ? (typeof body.meta === 'string' ? body.meta : JSON.stringify(body.meta))
+    : null
+  const result = await sql`
+    UPDATE pages
+    SET content = ${body.content},
+        title = COALESCE(${body.title || null}, title),
+        meta = COALESCE(${metaValue}::jsonb, meta),
+        updated_by = ${body.author || 'ai-agent'},
+        updated_at = now()
+    WHERE slug = ${slug}
+    RETURNING *
+  `
+  const updated = result[0]
+  if (!updated) return c.json({ error: 'not found' }, 404)
+  return c.json(updated)
+})
+
+api.get('/pages/:slug/versions', async (c) => {
+  const sql = c.get('sql')
+  const versions = await sql`
+    SELECT v.* FROM page_versions v
+    JOIN pages p ON p.id = v.page_id
+    WHERE p.slug = ${c.req.param('slug')}
+    ORDER BY v.version DESC
+    LIMIT 50
+  `
+  return c.json(versions)
+})
+
+api.post('/pages/:slug/publish', async (c) => {
+  const sql = c.get('sql')
+  const result = await sql`
+    UPDATE pages SET status = 'published', updated_at = now()
+    WHERE slug = ${c.req.param('slug')}
+    RETURNING *
+  `
+  const page = result[0]
+  if (!page) return c.json({ error: 'not found' }, 404)
+  return c.json(page)
+})
+
+api.post('/pages/:slug/unpublish', async (c) => {
+  const sql = c.get('sql')
+  const result = await sql`
+    UPDATE pages SET status = 'draft', updated_at = now()
+    WHERE slug = ${c.req.param('slug')}
+    RETURNING *
+  `
+  const page = result[0]
+  if (!page) return c.json({ error: 'not found' }, 404)
+  return c.json(page)
+})
+
+// ─── Helpers ────────────────────────────────────────────
+
+function guessContentType(filePath: string): string {
+  const ext = filePath.split('.').pop()?.toLowerCase()
+  const types: Record<string, string> = {
+    html: 'text/html',
+    htm: 'text/html',
+    css: 'text/css',
+    js: 'application/javascript',
+    ts: 'application/javascript',
+    json: 'application/json',
+    xml: 'application/xml',
+    svg: 'image/svg+xml',
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    ico: 'image/x-icon',
+    txt: 'text/plain',
+    md: 'text/markdown',
+  }
+  return types[ext || ''] || 'text/plain'
+}
 
 export { api }

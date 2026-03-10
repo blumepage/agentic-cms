@@ -9,15 +9,18 @@ interface FullEnv extends GitEnv {
   DATABASE_URL: string
 }
 
-// Sync a single page to GitHub via the Contents API (commits to main)
-export async function gitSyncPage(
-  slug: string,
-  page: Record<string, unknown>,
+// Sync a project file to GitHub via the Contents API
+export async function gitSyncFile(
+  projectSlug: string,
+  filePath: string,
+  file: Record<string, unknown>,
   env: GitEnv
 ) {
-  const path = `content/pages/${slug}.html`
-  const repo = env.GITHUB_REPO
   const token = env.GITHUB_TOKEN
+  const repo = env.GITHUB_REPO
+  if (!token || !repo) return
+
+  const path = `projects/${projectSlug}${filePath}`
   const headers = {
     Authorization: `Bearer ${token}`,
     'Content-Type': 'application/json',
@@ -36,33 +39,43 @@ export async function gitSyncPage(
     method: 'PUT',
     headers,
     body: JSON.stringify({
-      message: `content(${slug}): updated by ${page.updated_by}`,
-      content: btoa(String(page.content)),
+      message: `file(${projectSlug}:${filePath}): updated by ${file.updated_by}`,
+      content: btoa(String(file.content)),
       sha,
     })
   })
+}
 
-  // Also sync metadata
-  const metaPath = `content/pages/${slug}.json`
-  const existingMeta = await fetch(
-    `https://api.github.com/repos/${repo}/contents/${metaPath}`,
+// Legacy: Sync a single page to GitHub via the Contents API (commits to main)
+export async function gitSyncPage(
+  slug: string,
+  page: Record<string, unknown>,
+  env: GitEnv
+) {
+  const path = `content/pages/${slug}.html`
+  const repo = env.GITHUB_REPO
+  const token = env.GITHUB_TOKEN
+  if (!token || !repo) return
+
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json',
+    'User-Agent': 'agentic-cms'
+  }
+
+  const existing = await fetch(
+    `https://api.github.com/repos/${repo}/contents/${path}`,
     { headers }
   )
-  const metaSha = existingMeta.ok ? ((await existingMeta.json()) as { sha: string }).sha : undefined
+  const sha = existing.ok ? ((await existing.json()) as { sha: string }).sha : undefined
 
-  await fetch(`https://api.github.com/repos/${repo}/contents/${metaPath}`, {
+  await fetch(`https://api.github.com/repos/${repo}/contents/${path}`, {
     method: 'PUT',
     headers,
     body: JSON.stringify({
-      message: `meta(${slug}): updated by ${page.updated_by}`,
-      content: btoa(JSON.stringify({
-        title: page.title,
-        meta: page.meta,
-        status: page.status,
-        updated_at: page.updated_at,
-        updated_by: page.updated_by
-      }, null, 2)),
-      sha: metaSha,
+      message: `content(${slug}): updated by ${page.updated_by}`,
+      content: btoa(String(page.content)),
+      sha,
     })
   })
 }
@@ -75,6 +88,8 @@ export async function gitSyncAsPR(
 ) {
   const repo = env.GITHUB_REPO
   const token = env.GITHUB_TOKEN
+  if (!token || !repo) return
+
   const branchName = `agent/${slug}-${Date.now()}`
   const headers = {
     Authorization: `Bearer ${token}`,
@@ -87,7 +102,7 @@ export async function gitSyncAsPR(
     `https://api.github.com/repos/${repo}/git/ref/heads/main`,
     { headers }
   )
-  if (!mainRef.ok) return // can't sync if main doesn't exist
+  if (!mainRef.ok) return
 
   const mainRefData = await mainRef.json() as { object: { sha: string } }
 
@@ -134,9 +149,27 @@ export async function gitSyncAsPR(
   })
 }
 
-// Cron-triggered: sync all recently changed pages
+// Cron-triggered: sync all recently changed files and pages
 export async function syncAllToGit(env: FullEnv) {
   const sql = neon(env.DATABASE_URL)
+
+  // Sync recently changed files
+  const recentFiles = await sql`
+    SELECT f.*, p.slug as project_slug FROM files f
+    JOIN projects p ON p.id = f.project_id
+    WHERE f.updated_at > now() - interval '10 minutes'
+  `
+  for (const file of recentFiles) {
+    const fileRecord = file as Record<string, unknown>
+    await gitSyncFile(
+      fileRecord.project_slug as string,
+      fileRecord.path as string,
+      fileRecord,
+      env
+    )
+  }
+
+  // Legacy: sync recently changed pages
   const recentlyChanged = await sql`
     SELECT * FROM pages
     WHERE updated_at > now() - interval '10 minutes'
