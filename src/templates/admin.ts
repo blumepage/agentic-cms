@@ -115,7 +115,7 @@ export function renderProjectDetail(project: Project, files: ProjectFile[]) {
 }
 
 export function renderFileEditor(project: Project, file: ProjectFile) {
-  return `
+  return adminLayout(`${escapeHtml(file.path)} — Agentic CMS`, `
     <div class="animate-fade-in" id="editor">
       <div class="p-8 max-w-5xl">
         <div class="flex items-center justify-between mb-6">
@@ -187,7 +187,7 @@ export function renderFileEditor(project: Project, file: ProjectFile) {
         </div>
       </div>
     </div>
-  `
+  `)
 }
 
 export function renderNewProjectForm() {
